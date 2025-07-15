@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Role Confirm</title>
+</head>
+<body>
+    <h1>S3 Object Listing</h1>
+    <label for="bucketName">BucketName:</label>
+    <input type="text" id="bucketName" name="bucketName" value=""><br><br>
+    <label for="prefix">Prefix:</label>
+    <input type="text" id="prefix" name="prefix" value="/"><br><br>
+    <button onclick="listS3Objects()">List</button>
+    <div style="white-space: pre-wrap;" id="objectList"></div>
+    
+    <h1>Bedrock Test</h1>
+    <label for="bucketName">Question:</label>
+    <input type="text" id="question" name="question" value=""><br><br>
+    <button onclick="runBedrock()">Answer</button>
+    <div style="white-space: pre-wrap;" id="answer"></div>
+    
+    <h1>Kendra Test</h1>
+    <label for="keyword">Keyword:</label>
+    <input type="text" id="keyword" name="keyword" value=""><br><br>
+    <label for="keyword">Index ID:</label>
+    <input type="text" style="width: 400px;" id="indexId" name="indexId" value=""><br><br>
+    <label for="keyword">DataSource ID:</label>
+    <input type="text" style="width: 400px;" id="dataSourceId" name="dataSourceId" value=""><br><br>
+    <button onclick="runKendra()">Search</button>
+    <div style="white-space: pre-wrap;" id="kendraResult"></div>
+    
+    <h1>Athena Test</h1>
+    <label>DataSource:</label>
+    <input type="text" id="catalog" name="catalog" value=""><br><br>
+    <label">DataBase:</label>
+    <input type="text" id="database" name="database" value=""><br><br>
+    <label>Sql:</label>
+    <input type="text" style="width: 600px;" id="sql" name="sql" value=''><br><br>
+    <button onclick="runAthena()">Query</button>
+    <div style="white-space: pre-wrap;" id="athenaResult"></div>
+
+
+	<script type="module">
+		import {S3Client, ListObjectsV2Command, DeleteObjectCommand, CopyObjectCommand, PutObjectCommand} from 'https://cdn.skypack.dev/@aws-sdk/client-s3@3.454.0';
+		import {CognitoIdentityClient, GetIdCommand, GetCredentialsForIdentityCommand} from 'https://cdn.skypack.dev/@aws-sdk/client-cognito-identity@3.454.0';
+		import {fromCognitoIdentityPool} from 'https://cdn.skypack.dev/@aws-sdk/credential-provider-cognito-identity@3.454.0';
+		
+		import {BedrockRuntimeClient, ConverseCommand} from 'https://cdn.jsdelivr.net/npm/@aws-sdk/client-bedrock-runtime@3.844.0/+esm'
+		import {KendraClient, RetrieveCommand } from 'https://cdn.jsdelivr.net/npm/@aws-sdk/client-kendra@3.844.0/+esm'
+		import {AthenaClient, StartQueryExecutionCommand, GetQueryExecutionCommand,GetQueryResultsCommand,QueryExecutionState } from 'https://cdn.jsdelivr.net/npm/@aws-sdk/client-athena@3.844.0/+esm'
+
+    	const idToken = "xxxxx"
+
+    	const credentials = fromCognitoIdentityPool({
+                client: new CognitoIdentityClient({ region: "ap-northeast-1" }),
+                identityPoolId: 'xxxxx',
+				logins: {
+					[`xxxxx`]: idToken,
+				}
+              })
+    	const s3Client = new S3Client({
+	          region: "ap-northeast-1",
+	          credentials: credentials
+	        });
+    	
+    	
+    	// 結果表示用の関数
+		function displayResult(message, divid) {
+		    const resultDiv = document.getElementById(divid);
+		    resultDiv.textContent += `${message}\n`;
+		    resultDiv.scrollTop = resultDiv.scrollHeight;
+		}
+
+
+    	window.listS3Objects = async function() {
+		    const bucketName = document.getElementById('bucketName').value;
+		    const prefix = document.getElementById('prefix').value;
+		    const objectListDiv = document.getElementById('objectList');
+		    objectListDiv.innerHTML = ''; // Clear previous list
+
+		    if (!bucketName) {
+		        objectListDiv.innerHTML = '<p style="color: red;">バケット名を入力してください。</p>';
+		        return;
+		    }
+		    
+
+		    const command = new ListObjectsV2Command({
+	            Bucket: bucketName,
+	            Prefix: prefix
+	        });
+	        const response = await s3Client.send(command);
+		    if (response.Contents && response.Contents.length > 0) {
+	            displayResult(`オブジェクト一覧 (${response.Contents.length}件):`, "objectList");
+	            response.Contents.forEach(obj => {
+	                displayResult(`- ${obj.Key} (サイズ: ${obj.Size}bytes, 更新日: ${obj.LastModified})`, "objectList");
+	            });
+	        } else {
+	            displayResult('オブジェクトが見つかりませんでした', "objectList");
+	        }
+		};
+		
+		window.runBedrock = async function() {
+			const question = document.getElementById('question').value;
+		
+			const client = new BedrockRuntimeClient({ region: "ap-northeast-1", credentials: credentials});
+
+			// Set the model ID, e.g., Claude 3 Haiku.
+			const modelId = "arn:aws:bedrock:ap-northeast-1:xxxxx:inference-profile/apac.anthropic.claude-sonnet-4-20250514-v1:0";
+
+			// Start a conversation with the user message.
+			const conversation = [
+			  {
+			    role: "user",
+			    content: [{ text: question }],
+			  },
+			];
+
+			// Create a command with the model ID, the message, and a basic configuration.
+			const command = new ConverseCommand({
+			  modelId,
+			  messages: conversation,
+			  inferenceConfig: { maxTokens: 512, temperature: 0.5, topP: 0.9 },
+			});
+
+			try {
+			  // Send the command to the model and wait for the response
+			  const response = await client.send(command);
+
+			  // Extract and print the response text.
+			  const responseText = response.output.message.content[0].text;
+			  
+			  displayResult(responseText, "answer");
+			} catch (err) {
+			  console.log(`ERROR: Can't invoke '${modelId}'. Reason: ${err}`);
+			  process.exit(1);
+			}
+		};
+		
+		window.runKendra = async function() {  
+    
+			const keyword = document.getElementById('keyword').value;
+			const indexId = document.getElementById('indexId').value;
+			const dataSourceId = document.getElementById('dataSourceId').value;
+		
+			const client = new KendraClient({ region: "ap-northeast-1", credentials: credentials});
+			
+			const input = { // RetrieveRequest
+			  IndexId: indexId, // required
+			  QueryText: keyword, // required
+			  AttributeFilter:{
+		            AndAllFilters: [
+		                {
+		                    EqualsTo: {
+		                        Key: "_language_code",
+		                        Value: {"StringValue": "ja"},
+		                    }
+		                },
+		                {
+		                    EqualsTo: {
+		                        Key: '_data_source_id',
+		                        Value: {
+		                            StringValue: dataSourceId
+		                        }
+		                    }
+		                }
+		            ]
+		        },
+		        PageSize:3
+	        }
+	        
+	        const command = new RetrieveCommand(input);
+			const response = await client.send(command);
+	        if (response.ResultItems && response.ResultItems.length > 0) {
+	            displayResult(`検索結果 (${response.ResultItems.length}件):`, "kendraResult");
+	            response.ResultItems.forEach(obj => {
+	                displayResult(obj.Content, "kendraResult");
+	            });
+	        } else {
+	            displayResult('検索結果が見つかりませんでした', "kendraResult");
+	        }
+		};
+		
+		
+		window.runAthena = async function() {  
+    		const catalog = document.getElementById('catalog').value;
+			const database = document.getElementById('database').value;
+			const sql = document.getElementById('sql').value;
+		
+			const athenaClient = new AthenaClient({ region: "ap-northeast-1", credentials: credentials});
+			
+			const input = { // StartQueryExecutionInput
+				QueryString: sql, // required
+				QueryExecutionContext: { // QueryExecutionContext
+					Database: database,
+					Catalog: catalog,
+				},
+				ResultConfiguration: { // ResultConfiguration
+					OutputLocation: "s3://xxxxx"
+				}
+			};
+				
+			const QueryExecution = await athenaClient.send(new StartQueryExecutionCommand(input));
+			const queryExecutionId = QueryExecution.QueryExecutionId;
+			//const command = new GetQueryExecutionCommand(queryExecutionId);
+			//response = await athenaClient.send(command);
+
+			//const state = response.QueryExecution?.Status?.State;
+			
+			await new Promise((resolve) => setTimeout(resolve, 2000));
+			let response = await athenaClient.send(new GetQueryExecutionCommand({QueryExecutionId: queryExecutionId}));
+		    let state = response.QueryExecution?.Status?.State;
+		    
+			while (state === QueryExecutionState.QUEUED || state === QueryExecutionState.RUNNING) {
+				await new Promise((resolve) => setTimeout(resolve, 5000));
+				response = await athenaClient.send(new GetQueryExecutionCommand({QueryExecutionId: queryExecutionId}));
+		    	state = response.QueryExecution?.Status?.State;
+				console.log("実行中。。。")
+			}
+			if(state === QueryExecutionState.SUCCEEDED) {
+			    const resultParams = { QueryExecutionId: response.QueryExecution.QueryExecutionId, MaxResults: 3};
+			    const getQueryResultsCommand = new GetQueryResultsCommand(resultParams);
+			    const resp = await athenaClient.send(getQueryResultsCommand);
+			    // console.log("GetQueryResultsCommand : ", resp.ResultSet.ResultSetMetadata.ColumnInfo);
+			    // console.log("GetQueryResultsCommand : ", resp.ResultSet.Rows);
+				if (resp.ResultSet.Rows && resp.ResultSet.Rows.length > 0) {
+		            displayResult(`検索結果 (${resp.ResultSet.Rows.length}件):`, "athenaResult");
+		            resp.ResultSet.Rows.forEach(obj => {
+		                displayResult(obj.Data.map(obj1 => obj1.VarCharValue), "athenaResult");
+		            });
+		        } else {
+		            displayResult('検索結果が見つかりませんでした', "athenaResult");
+		        }
+
+			} else if(state === QueryExecutionState.FAILED) {
+			    throw new Error(`Query failed: ${response.QueryExecution?.Status?.StateChangeReason}`);
+			} else if(state === QueryExecutionState.CANCELLED) {
+			    throw new Error("Query was cancelled");
+			}
+		};
+    </script>
+</body>
+</html>
